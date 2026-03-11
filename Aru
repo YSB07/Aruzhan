@@ -1,0 +1,530 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, Pause, MapPin, CalendarHeart, Clock, ChevronDown, Heart, Send, Lock, Users, User, UserX, X } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, query, onSnapshot, orderBy, serverTimestamp } from 'firebase/firestore';
+
+// ============================================================================
+// FIREBASE БАПТАУЛАРЫ
+// ============================================================================
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+export default function KyzUzatuInvitation() {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const audioRef = useRef(null);
+  const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0 });
+  const [rsvpStatus, setRsvpStatus] = useState(null);
+  
+  // RSVP Формасының күйі
+  const [guestName, setGuestName] = useState('');
+  const [attendance, setAttendance] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  
+  // Админ панель күйі
+  const [user, setUser] = useState(null);
+  const [secretClickCount, setSecretClickCount] = useState(0);
+  const [showAdminLogin, setShowAdminLogin] = useState(false);
+  const [adminPassword, setAdminPassword] = useState('');
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(false);
+  const [guestsData, setGuestsData] = useState([]);
+  const [dbError, setDbError] = useState('');
+
+  // Той күні: 2026 жыл, 10 Сәуір, сағат 18:00
+  const eventDate = new Date('2026-04-10T18:00:00').getTime();
+
+  useEffect(() => {
+    signInAnonymously(auth).catch((error) => console.error("Auth Error:", error));
+    const unsubscribeAuth = onAuthStateChanged(auth, setUser);
+
+    const timer = setInterval(() => {
+      const now = new Date().getTime();
+      const distance = eventDate - now;
+
+      if (distance < 0) {
+        clearInterval(timer);
+        return;
+      }
+
+      setTimeLeft({
+        days: Math.floor(distance / (1000 * 60 * 60 * 24)),
+        hours: Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60)),
+        minutes: Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60)),
+        seconds: Math.floor((distance % (1000 * 60)) / 1000)
+      });
+    }, 1000);
+
+    return () => {
+      clearInterval(timer);
+      unsubscribeAuth();
+    };
+  }, [eventDate]);
+
+  useEffect(() => {
+    if (!user || !isAdminLoggedIn) return;
+
+    const guestsRef = collection(db, 'artifacts', appId, 'public', 'guests');
+    const q = query(guestsRef); 
+
+    const unsubscribeDB = onSnapshot(q, 
+      (snapshot) => {
+        const guests = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        guests.sort((a, b) => (b.timestamp?.toMillis() || 0) - (a.timestamp?.toMillis() || 0));
+        setGuestsData(guests);
+      },
+      (error) => {
+        console.error("Firebase Error:", error);
+        setDbError("Деректерді жүктеу кезінде қате кетті.");
+      }
+    );
+
+    return () => unsubscribeDB();
+  }, [user, isAdminLoggedIn]);
+
+  const toggleMusic = () => {
+    if (isPlaying) {
+      audioRef.current?.pause();
+    } else {
+      audioRef.current?.play().catch(e => console.log("Музыка қосылмады:", e));
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const handleRSVPSubmit = async (e) => {
+    e.preventDefault();
+    if (!user || !guestName.trim() || !attendance) return;
+
+    setIsSubmitting(true);
+    try {
+      const guestsRef = collection(db, 'artifacts', appId, 'public', 'guests');
+      await addDoc(guestsRef, {
+        name: guestName.trim(),
+        status: attendance, 
+        timestamp: serverTimestamp(),
+        userId: user.uid
+      });
+      setRsvpStatus('submitted');
+    } catch (error) {
+      console.error("Тіркелу қатесі:", error);
+      alert("Кешіріңіз, қате кетті. Қайта көріңізші.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleFooterClick = () => {
+    const newCount = secretClickCount + 1;
+    setSecretClickCount(newCount);
+    
+    if (newCount === 5) { 
+      setShowAdminLogin(true);
+      setSecretClickCount(0);
+    }
+    
+    setTimeout(() => {
+      if (secretClickCount === newCount) setSecretClickCount(0);
+    }, 2000);
+  };
+
+  const handleAdminLogin = (e) => {
+    e.preventDefault();
+    if (adminPassword === '260426') { 
+      setIsAdminLoggedIn(true);
+      setShowAdminLogin(false);
+      setAdminPassword('');
+    } else {
+      alert("Құпия сөз қате / Неверный пароль");
+    }
+  };
+
+  const stats = {
+    total: guestsData.length,
+    attendingSingle: guestsData.filter(g => g.status === 'yes_single').length,
+    attendingCouple: guestsData.filter(g => g.status === 'yes_couple').length,
+    notAttending: guestsData.filter(g => g.status === 'no').length,
+  };
+  const totalHeads = stats.attendingSingle + (stats.attendingCouple * 2);
+
+  // ============================================================================
+  // АДМИН ПАНЕЛЬ РЕНДЕРІ
+  // ============================================================================
+  if (isAdminLoggedIn) {
+    return (
+      <div className="min-h-screen bg-stone-100 p-4 md:p-8 font-modern text-stone-800">
+        <div className="max-w-4xl mx-auto bg-white rounded-2xl shadow-xl overflow-hidden">
+          <div className="bg-[#3a3734] p-6 text-white flex justify-between items-center">
+            <h1 className="font-elegant text-3xl">Аружан ұзату - Қонақтар тізімі</h1>
+            <button onClick={() => setIsAdminLoggedIn(false)} className="flex items-center gap-2 hover:text-stone-300 transition">
+              <X className="w-5 h-5"/> Жабу
+            </button>
+          </div>
+
+          <div className="p-6">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+              <div className="bg-stone-50 p-4 rounded-xl border border-stone-200 text-center shadow-sm">
+                <Users className="w-6 h-6 mx-auto mb-2 text-stone-500"/>
+                <p className="text-sm text-stone-500 mb-1">Келетін адам саны</p>
+                <p className="text-3xl font-elegant">{totalHeads}</p>
+              </div>
+              <div className="bg-green-50 p-4 rounded-xl border border-green-100 text-center shadow-sm">
+                <User className="w-6 h-6 mx-auto mb-2 text-green-600"/>
+                <p className="text-sm text-green-700 mb-1">Жалғыз келетіндер</p>
+                <p className="text-3xl font-elegant text-green-800">{stats.attendingSingle}</p>
+              </div>
+              <div className="bg-blue-50 p-4 rounded-xl border border-blue-100 text-center shadow-sm">
+                <Users className="w-6 h-6 mx-auto mb-2 text-blue-600"/>
+                <p className="text-sm text-blue-700 mb-1">Жұбымен келетіндер</p>
+                <p className="text-3xl font-elegant text-blue-800">{stats.attendingCouple}</p>
+              </div>
+              <div className="bg-red-50 p-4 rounded-xl border border-red-100 text-center shadow-sm">
+                <UserX className="w-6 h-6 mx-auto mb-2 text-red-500"/>
+                <p className="text-sm text-red-700 mb-1">Келе алмайтындар</p>
+                <p className="text-3xl font-elegant text-red-800">{stats.notAttending}</p>
+              </div>
+            </div>
+
+            {dbError && <div className="text-red-500 p-4 bg-red-50 rounded-lg mb-4">{dbError}</div>}
+
+            <div className="overflow-x-auto rounded-xl border border-stone-200">
+              <table className="w-full text-left border-collapse bg-white">
+                <thead>
+                  <tr className="bg-stone-50 border-b border-stone-200">
+                    <th className="p-4 font-medium text-stone-600">Аты-жөні</th>
+                    <th className="p-4 font-medium text-stone-600">Жауабы</th>
+                    <th className="p-4 font-medium text-stone-600">Уақыты</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {guestsData.length === 0 ? (
+                    <tr><td colSpan="3" className="p-8 text-center text-stone-500 bg-white">Әзірге ешкім жауап бермеді.</td></tr>
+                  ) : (
+                    guestsData.map((guest) => (
+                      <tr key={guest.id} className="border-b border-stone-100 hover:bg-stone-50 transition-colors">
+                        <td className="p-4 font-medium text-stone-800">{guest.name}</td>
+                        <td className="p-4">
+                          {guest.status === 'yes_single' && <span className="inline-block px-3 py-1 bg-green-100 text-green-800 rounded-full text-[13px]">Жалғыз келеді</span>}
+                          {guest.status === 'yes_couple' && <span className="inline-block px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-[13px]">Жұбымен келеді (2 адам)</span>}
+                          {guest.status === 'no' && <span className="inline-block px-3 py-1 bg-red-100 text-red-800 rounded-full text-[13px]">Келе алмайды</span>}
+                        </td>
+                        <td className="p-4 text-sm text-stone-500">
+                          {guest.timestamp ? new Date(guest.timestamp.toDate()).toLocaleString('kk-KZ') : 'Қазір'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // НЕГІЗГІ ШАҚЫРУ БИЛЕТІ
+  // ============================================================================
+  return (
+    <div className="min-h-screen bg-black flex justify-center text-neutral-800 font-sans selection:bg-neutral-300">
+      <style dangerouslySetInnerHTML={{__html: `
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&display=swap');
+        .font-elegant { font-family: 'Playfair Display', serif; }
+        .font-modern { font-family: 'Inter', sans-serif; }
+        .animate-bounce-slow { animation: bounce 3s infinite; }
+        .spin-slow { animation: spin 4s linear infinite; }
+      `}} />
+
+      {showAdminLogin && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <form onSubmit={handleAdminLogin} className="bg-white p-8 rounded-2xl max-w-sm w-full shadow-2xl animate-in zoom-in duration-200">
+            <div className="flex justify-center mb-6"><Lock className="w-12 h-12 text-stone-800"/></div>
+            <h3 className="font-elegant text-2xl text-center mb-2">Құпия сөз</h3>
+            <p className="font-modern text-[13px] text-center text-stone-500 mb-6">Қонақтар тізімін көру үшін пароль енгізіңіз</p>
+            <input 
+              type="password" 
+              value={adminPassword}
+              onChange={(e) => setAdminPassword(e.target.value)}
+              placeholder="Пароль..."
+              className="w-full border border-stone-300 rounded-xl p-3 mb-6 text-center tracking-widest outline-none focus:border-stone-800 transition-colors"
+              autoFocus
+            />
+            <div className="flex gap-3">
+              <button type="button" onClick={() => setShowAdminLogin(false)} className="flex-1 py-3 bg-stone-100 hover:bg-stone-200 transition-colors rounded-xl text-stone-700 font-medium text-sm">Жабу</button>
+              <button type="submit" className="flex-1 py-3 bg-[#3a3734] hover:bg-black transition-colors text-white rounded-xl font-medium text-sm">Кіру</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="w-full max-w-md bg-stone-50 shadow-2xl relative overflow-x-hidden">
+        
+        {/* ЖАҢА ФОНДЫҚ МУЗЫКА (Қарақат Әбілдина) / НОВАЯ ФОНОВАЯ МУЗЫКА */}
+        <audio loop ref={audioRef} src="https://increasing-green-ovazzngbyu.edgeone.app/Қарақат%20Әбілдина%20-%20Қызға%20тілек.mp3" />
+
+        {/* 1. БАСТЫ БЕТ (МҰҚАБА) */}
+        <section className="relative h-screen flex flex-col items-center justify-center text-white text-center">
+          
+          <div 
+            className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+            style={{ 
+              backgroundImage: 'url("https://proposed-silver-zwz6qmlgtx.edgeone.app/3b0fa311-1b75-4f49-b818-04802d64e40c.jpeg")',
+              filter: 'brightness(50%) contrast(105%)'
+            }}
+          />
+          <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/20 to-black/60" />
+
+          <div className="relative z-10 w-full px-6 flex flex-col items-center h-full pb-20 pt-32">
+            <h1 className="font-elegant text-6xl mb-2 leading-tight drop-shadow-lg">
+              Аружан
+            </h1>
+            <p className="font-elegant text-2xl tracking-[0.1em] italic mt-3 opacity-95 drop-shadow-md">
+              ұядан ұшқан күн
+            </p>
+            
+            <p className="font-modern text-[13px] tracking-[0.3em] uppercase mt-10 opacity-90 border-t border-b border-white/40 py-2.5 px-4 shadow-sm">
+              10 • 04 • 2026
+            </p>
+
+            <div className="mt-auto mb-16 flex flex-col items-center">
+              <button 
+                onClick={toggleMusic}
+                className={`relative w-16 h-16 rounded-full border border-white/50 flex items-center justify-center bg-black/30 backdrop-blur-sm transition-all duration-300 hover:bg-white/20 ${isPlaying ? 'border-white/90 scale-105 shadow-[0_0_15px_rgba(255,255,255,0.3)]' : ''}`}
+              >
+                <svg className={`absolute inset-0 w-full h-full -rotate-90 ${isPlaying ? 'spin-slow' : ''}`} viewBox="0 0 100 100">
+                  <path id="circlePath" d="M 50, 50 m -35, 0 a 35,35 0 1,1 70,0 a 35,35 0 1,1 -70,0" fill="none" />
+                  <text className="text-[10px] fill-white uppercase tracking-widest font-modern opacity-90" style={{ letterSpacing: '2px' }}>
+                    <textPath href="#circlePath" startOffset="50%" textAnchor="middle">
+                      Музыканы қосу үшін • Басыңыз •
+                    </textPath>
+                  </text>
+                </svg>
+                {isPlaying ? <Pause className="w-5 h-5 ml-0.5" /> : <Play className="w-5 h-5 ml-1" />}
+              </button>
+            </div>
+
+            <div className="absolute bottom-8 animate-bounce-slow opacity-80">
+              <ChevronDown className="w-8 h-8 font-light" />
+            </div>
+          </div>
+        </section>
+
+        {/* 2. ШАҚЫРУ МӘТІНІ */}
+        <section className="relative py-24 px-6 text-center text-white min-h-[85vh] flex flex-col justify-center shadow-inner">
+          
+          <div 
+            className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+            style={{ 
+              backgroundImage: 'url("https://great-beige-rc1iejlawd.edgeone.app/0e3c8da9-61fa-456f-8e48-74cfae1117f0.jpeg")',
+              filter: 'brightness(45%) contrast(110%)'
+            }}
+          />
+          <div className="absolute inset-0 bg-black/50" /> 
+
+          <div className="relative z-10 space-y-8 px-2">
+            <span className="text-4xl mb-2 block drop-shadow-md opacity-90">🌸</span>
+            <h2 className="font-elegant text-[28px] mb-4 leading-snug drop-shadow-lg text-white">
+              Құрметті ағайын-туыс, <br/>құда-жекжат, дос-жаран!
+            </h2>
+            
+            <div className="w-12 h-px bg-white/40 mx-auto my-6"></div>
+
+            <p className="font-modern text-[15px] font-light leading-loose text-white/95 drop-shadow-md">
+              Сіздерді аяулы қызымыз <span className="font-medium text-white tracking-wide">Аружанның қыз ұзату тойына</span> арналған ақ дастарханымыздың қадірлі қонағы болуға шақырамыз.
+            </p>
+            <p className="font-modern text-[15px] font-light leading-loose text-white/95 drop-shadow-md">
+              Бойжеткен қызымызды ақ босағадан аттандырып, жаңа өмірге қадам басар қуанышты сәтімізді бірге бөлісіп, ақ тілектеріңізді арнауға келіңіздер.
+            </p>
+            <span className="text-3xl mt-8 block drop-shadow-md opacity-90">🤍</span>
+          </div>
+        </section>
+
+        {/* 3. УАҚЫТ ПЕН МЕКЕН-ЖАЙ */}
+        <section className="relative py-20 px-6 border-t border-stone-200 shadow-[0_-10px_20px_rgba(0,0,0,0.05)] z-20">
+          
+          <div 
+            className="absolute inset-0 bg-cover bg-center bg-no-repeat"
+            style={{ 
+              backgroundImage: 'url("https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&q=80&w=1080")',
+              filter: 'grayscale(30%)'
+            }}
+          />
+          <div className="absolute inset-0 bg-[#faf9f8]/85 backdrop-blur-[2px]" />
+
+          <div className="relative z-10 space-y-16">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-14 h-14 rounded-full bg-white/80 shadow-sm border border-stone-100 flex items-center justify-center mb-5 text-stone-700 backdrop-blur-sm">
+                <CalendarHeart strokeWidth={1.5} className="w-6 h-6" />
+              </div>
+              <h3 className="font-modern font-medium text-[11px] tracking-[0.2em] uppercase mb-3 text-stone-500">Күні мен Уақыты</h3>
+              <p className="font-elegant text-[32px] mb-2 text-stone-800">10 Сәуір, 2026</p>
+              <div className="flex items-center justify-center gap-2 text-stone-600 text-[14px] mt-2 font-modern bg-stone-800/5 px-4 py-2 rounded-full border border-stone-800/10">
+                <Clock className="w-4 h-4" />
+                <span>Сағат: 18:00</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col items-center text-center">
+              <div className="w-14 h-14 rounded-full bg-white/80 shadow-sm border border-stone-100 flex items-center justify-center mb-5 text-stone-700 backdrop-blur-sm">
+                <MapPin strokeWidth={1.5} className="w-6 h-6" />
+              </div>
+              <h3 className="font-modern font-medium text-[11px] tracking-[0.2em] uppercase mb-4 text-stone-500">Мекен-жайы</h3>
+              
+              <p className="font-elegant text-[28px] mb-2 text-stone-800 drop-shadow-sm">Baiterek</p>
+              <p className="font-modern text-[12px] tracking-widest uppercase text-stone-500 mb-4">Grand Hall</p>
+              
+              <p className="font-modern text-[14px] font-medium text-stone-700 leading-relaxed max-w-[280px]">
+                Түлкібас ауданы,<br/>
+                Т.Рысқұлов ауылы,<br/>
+                <span className="font-semibold text-stone-900 mt-1 block">Т.Рысқұлов көшесі 149</span>
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* 4. КЕРІ САНАҚ ТАЙМЕРІ */}
+        <section className="py-20 px-6 text-center bg-[#181817] text-stone-100 relative">
+          <div className="absolute inset-0 opacity-5" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg width=\'60\' height=\'60\' viewBox=\'0 0 60 60\' xmlns=\'http://www.w3.org/2000/svg\'%3E%3Cg fill=\'none\' fill-rule=\'evenodd\'%3E%3Cg fill=\'%23ffffff\' fill-opacity=\'1\'%3E%3Cpath d=\'M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z\'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")' }}></div>
+          
+          <div className="relative z-10">
+            <h2 className="font-elegant text-3xl mb-12 text-stone-300">Тойға дейін қалды:</h2>
+            <div className="flex justify-center gap-4 sm:gap-6">
+              <div className="flex flex-col items-center w-16">
+                <span className="font-elegant text-[44px] mb-2">{timeLeft.days}</span>
+                <span className="font-modern text-[10px] text-stone-500 uppercase tracking-[0.2em]">Күн</span>
+              </div>
+              <span className="font-elegant text-3xl opacity-20 mt-2">:</span>
+              <div className="flex flex-col items-center w-16">
+                <span className="font-elegant text-[44px] mb-2">{timeLeft.hours}</span>
+                <span className="font-modern text-[10px] text-stone-500 uppercase tracking-[0.2em]">Сағат</span>
+              </div>
+              <span className="font-elegant text-3xl opacity-20 mt-2">:</span>
+              <div className="flex flex-col items-center w-16">
+                <span className="font-elegant text-[44px] mb-2">{timeLeft.minutes}</span>
+                <span className="font-modern text-[10px] text-stone-500 uppercase tracking-[0.2em]">Минут</span>
+              </div>
+              <span className="font-elegant text-3xl opacity-20 mt-2">:</span>
+              <div className="flex flex-col items-center w-16">
+                <span className="font-elegant text-[44px] mb-2">{timeLeft.seconds}</span>
+                <span className="font-modern text-[10px] text-stone-500 uppercase tracking-[0.2em]">Секунд</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 5. САУАЛНАМА (RSVP) */}
+        <section className="py-24 px-8 bg-white relative z-20">
+          <div className="text-center mb-12">
+            <h2 className="font-elegant text-[32px] mb-4 tracking-widest uppercase text-stone-800">Сауалнама</h2>
+            <p className="font-modern text-[15px] font-light text-stone-700 mb-2">
+              Қатысатыныңызды растауыңызды сұраймыз!
+            </p>
+            <p className="font-modern text-[12px] text-stone-400">
+              Жауабыңызды 01.04.2026 дейін күтеміз:
+            </p>
+          </div>
+
+          {rsvpStatus === 'submitted' ? (
+             <div className="bg-stone-50 p-10 text-center rounded-2xl border border-stone-100 shadow-sm animate-in fade-in duration-500">
+               <Heart className="w-10 h-10 mx-auto mb-5 text-[#3a3734] fill-[#3a3734]" />
+               <h3 className="font-elegant text-3xl mb-3 text-stone-800">Көп рахмет!</h3>
+               <p className="text-stone-500 font-modern font-light text-[15px] leading-relaxed">Жауабыңыз қабылданды,<br/>сізді асыға күтеміз.</p>
+             </div>
+          ) : (
+            <form onSubmit={handleRSVPSubmit} className="space-y-8 font-modern text-sm text-left">
+              <div>
+                <label className="block text-stone-800 mb-3 font-medium text-[13px]">
+                  Аты-жөніңіз (егер жұбыңызбен келсеңіз, есімдеріңізді жазыңыз)
+                </label>
+                <input 
+                  type="text" 
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  placeholder="Аты-жөніңізді жазыңыз..." 
+                  required
+                  className="w-full bg-stone-50/50 border border-stone-200 rounded-xl py-4 px-5 focus:outline-none focus:border-stone-400 focus:bg-white transition-all text-stone-800 text-[14px]"
+                />
+              </div>
+
+              <div className="space-y-4 pt-2">
+                <p className="text-stone-800 mb-5 font-medium text-[13px]">Тойға қатысуыңыз</p>
+                
+                <label className="flex items-center gap-4 cursor-pointer group">
+                  <div className="relative flex items-center justify-center">
+                    <input 
+                      type="radio" 
+                      name="attendance" 
+                      value="yes_single"
+                      required
+                      checked={attendance === 'yes_single'}
+                      onChange={(e) => setAttendance(e.target.value)}
+                      className="peer appearance-none w-5 h-5 border border-stone-300 rounded-full checked:border-[#3a3734] transition-all cursor-pointer"
+                    />
+                    <div className="absolute w-2.5 h-2.5 rounded-full bg-[#3a3734] opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none"></div>
+                  </div>
+                  <span className="text-stone-600 text-[14px] font-light group-hover:text-black transition-colors select-none">Қуана-қуана келемін! (Жалғыз)</span>
+                </label>
+                
+                <label className="flex items-center gap-4 cursor-pointer group">
+                  <div className="relative flex items-center justify-center">
+                    <input 
+                      type="radio" 
+                      name="attendance" 
+                      value="yes_couple"
+                      required
+                      checked={attendance === 'yes_couple'}
+                      onChange={(e) => setAttendance(e.target.value)}
+                      className="peer appearance-none w-5 h-5 border border-stone-300 rounded-full checked:border-[#3a3734] transition-all cursor-pointer"
+                    />
+                    <div className="absolute w-2.5 h-2.5 rounded-full bg-[#3a3734] opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none"></div>
+                  </div>
+                  <span className="text-stone-600 text-[14px] font-light group-hover:text-black transition-colors select-none">Жұбыммен келемін (2 адам)</span>
+                </label>
+
+                <label className="flex items-center gap-4 cursor-pointer group">
+                  <div className="relative flex items-center justify-center">
+                    <input 
+                      type="radio" 
+                      name="attendance" 
+                      value="no"
+                      required
+                      checked={attendance === 'no'}
+                      onChange={(e) => setAttendance(e.target.value)}
+                      className="peer appearance-none w-5 h-5 border border-stone-300 rounded-full checked:border-[#3a3734] transition-all cursor-pointer"
+                    />
+                    <div className="absolute w-2.5 h-2.5 rounded-full bg-[#3a3734] opacity-0 peer-checked:opacity-100 transition-opacity pointer-events-none"></div>
+                  </div>
+                  <span className="text-stone-600 text-[14px] font-light group-hover:text-black transition-colors select-none">Өкінішке орай, келе алмаймын</span>
+                </label>
+              </div>
+
+              <button 
+                type="submit"
+                disabled={isSubmitting}
+                className={`w-full bg-[#3a3734] text-white py-4 mt-6 rounded-xl font-medium text-[14px] hover:bg-black transition-all shadow-md active:scale-[0.98] flex justify-center items-center gap-2 ${isSubmitting ? 'opacity-70 cursor-not-allowed' : ''}`}
+              >
+                {isSubmitting ? 'Жіберілуде...' : <>Жіберу <Send className="w-4 h-4"/></>}
+              </button>
+            </form>
+          )}
+        </section>
+
+        {/* Подвал / Құпия админ кіру нүктесі */}
+        <footer 
+          onClick={handleFooterClick}
+          className="py-8 text-center bg-[#181817] text-stone-500 text-[9px] font-modern uppercase tracking-widest border-t border-white/5 cursor-pointer select-none hover:text-stone-400 transition-colors"
+        >
+          <p>Created for Aruzhan's Uzatu</p>
+        </footer>
+
+      </div>
+    </div>
+  );
+}
+
+
